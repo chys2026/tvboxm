@@ -1,0 +1,137 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version name (e.g. 1.1.2)'
+        required: true
+        default: '1.1.2'
+      version_code:
+        description: 'Version code (integer)'
+        required: true
+        default: '32'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Set version from tag or input
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG_NAME=${GITHUB_REF#refs/tags/}
+            VERSION_NAME=${TAG_NAME#v}
+            echo "version_name=$VERSION_NAME" >> $GITHUB_OUTPUT
+          else
+            echo "version_name=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "version_code=${{ github.event.inputs.version_code }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update version in build.gradle
+        run: |
+          VNAME="${{ steps.version.outputs.version_name }}"
+          VCODE="${{ steps.version.outputs.version_code }}"
+          if [ -n "$VNAME" ]; then
+            sed -i "s/versionName '.*'/versionName '$VNAME'/g" app/build.gradle
+          fi
+          if [ -n "$VCODE" ]; then
+            sed -i "s/versionCode [0-9]*/versionCode $VCODE/g" app/build.gradle
+          fi
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: release-gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            release-gradle-${{ runner.os }}-
+
+      - name: Copy signing keystore
+        run: |
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > TVBoxOSC.jks
+          fi
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build release APK (${{ matrix.abi }})
+        run: |
+          sed -i "s/abiFilters \"arm64-v8a\"/abiFilters \"${{ matrix.abi }}\"/g" app/build.gradle
+          ./gradlew assemblerelease --build-cache --parallel --warning-mode all --stacktrace
+
+      - name: Collect APK (${{ matrix.abi }})
+        run: |
+          mkdir -p apk/
+          find app/build/outputs/apk -name "*.apk" -exec cp {} apk/ \;
+
+      - name: Upload APK (${{ matrix.abi }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: TVBoxOSC-release-${{ matrix.abi }}
+          path: apk/*.apk
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: TVBoxOSC-release-*
+          merge-multiple: true
+          path: apk/
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-creatordate | grep -A1 "${GITHUB_REF_NAME}" | tail -1)
+          if [ -z "$PREV_TAG" ]; then
+            echo "changelog=Initial release" >> $GITHUB_OUTPUT
+          else
+            echo "changelog<<EOF" >> $GITHUB_OUTPUT
+            git log --oneline --no-merges $PREV_TAG..${GITHUB_REF_NAME} | head -30 >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: apk/*.apk
+          body: |
+            ## 更新日志
+
+            ${{ steps.changelog.outputs.changelog }}
+
+            ## 下载
+
+            请根据设备架构选择对应的 APK：
+            - arm64-v8a: 适用于大多数现代设备（64位）
+            - armeabi-v7a: 适用于旧设备（32位）
+          draft: false
+          prerelease: false

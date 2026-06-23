@@ -1,0 +1,96 @@
+name: Test Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      abi_filter:
+        description: 'ABI Filter'
+        required: false
+        default: 'arm64-v8a'
+        type: choice
+        options:
+          - arm64-v8a
+          - armeabi-v7a
+          - all
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Setup build parameters
+        id: params
+        run: |
+          ABI_FILTER="${{ github.event.inputs.abi_filter || 'arm64-v8a' }}"
+          if [ "$ABI_FILTER" = "all" ]; then
+            echo "abi=${{ matrix.abi }}" >> $GITHUB_OUTPUT
+            echo "build_all=1" >> $GITHUB_OUTPUT
+          else
+            echo "abi=$ABI_FILTER" >> $GITHUB_OUTPUT
+            echo "build_all=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Filter ABI matrix
+        if: steps.params.outputs.build_all == '0' && matrix.abi != steps.params.outputs.abi
+        run: |
+          echo "Skipping ABI ${{ matrix.abi }}"
+          exit 0
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Copy signing keystore
+        run: |
+          if [ -f "${{ github.workspace }}/TVBoxOSC.jks" ]; then
+            echo "Keystore found"
+          elif [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > TVBoxOSC.jks
+          fi
+
+      - name: Build release APK (${{ matrix.abi }})
+        run: |
+          sed -i "s/abiFilters \"arm64-v8a\"/abiFilters \"${{ matrix.abi }}\"/g" app/build.gradle
+          ./gradlew assemblerelease --build-cache --parallel --warning-mode all --stacktrace
+
+      - name: Collect APK (${{ matrix.abi }})
+        run: |
+          mkdir -p apk/
+          find app/build/outputs/apk -name "*.apk" -exec cp {} apk/ \;
+          ls -la apk/
+
+      - name: Upload APK artifact (${{ matrix.abi }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: TVBoxOSC-${{ matrix.abi }}
+          path: apk/*.apk
+
+      - name: Upload mapping files
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mapping-${{ matrix.abi }}
+          path: app/build/outputs/mapping/
