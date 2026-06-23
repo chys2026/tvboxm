@@ -1,0 +1,33 @@
+name: Build and Sign APK
+on:
+ push:
+   tags:
+     - "v*"
+jobs:
+ build:
+   runs-on: ubuntu-latest
+   steps:
+     # 检出代码
+     - uses: actions/checkout@v3
+     # 设置Java环境
+     - uses: actions/setup-java@v3
+       with:
+         distribution: temurin
+         java-version: 11
+     # 设置Gradle环境并构建APK
+     - uses: gradle/gradle-build-action@v2
+       with:
+         arguments: assembleRelease
+     # 签名APK
+     - uses: r0adkll/sign-android-release@v1
+       with:
+         releaseDirectory: app/build/outputs/apk/release
+         signingKeyBase64: ${{ secrets.SIGNING_KEY }}
+         alias: ${{ secrets.ALIAS }}
+         keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
+         keyPassword: ${{ secrets.KEY_PASSWORD }}
+     # 上传签名后的APK到Release页面
+     - uses: ncipollo/release-action@v1
+       with:
+         artifacts: "*.apk"
+         token: ${{ github.token }}
